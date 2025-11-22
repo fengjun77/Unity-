@@ -34,6 +34,7 @@ export interface QuizResult {
   score: number;
   total: number;
   answers: number[];
+  wrongQuestionIndices: number[]; // Indices of wrong questions in the current session
 }
 
 export interface SavedNote {
@@ -43,6 +44,7 @@ export interface SavedNote {
   topics: Topic[];
   content: string;
   quizScore: number;
+  mistakes?: string[]; // Array of question texts that were answered incorrectly
 }
 
 export interface UserData {

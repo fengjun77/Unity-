@@ -16,6 +16,7 @@ const App: React.FC = () => {
   // App Flow State
   const [view, setView] = useState<AppView>(AppView.LOGIN);
   const [loading, setLoading] = useState(false);
+  const [isReviewing, setIsReviewing] = useState(false);
   
   // Learning State
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -46,7 +47,6 @@ const App: React.FC = () => {
         if (loadedUser.activeSession.step === 'LEARNING') {
             setView(AppView.LEARNING);
         } else if (loadedUser.activeSession.step === 'QUIZ') {
-             // We don't save answers in progress for simplicity, just the questions
              setQuizAnswers(new Array(loadedUser.activeSession.questions.length).fill(-1));
              setView(AppView.QUIZ);
         }
@@ -57,9 +57,8 @@ const App: React.FC = () => {
 
   // Navigation Logic
   const goHome = () => {
-     // If in a session, warn or just let them go, state is preserved in 'user' or component state
-     // Ideally we just switch view, but if they want to "Back to Lesson" we need to track that.
      setView(AppView.HOME);
+     setIsReviewing(false);
   };
 
   const resumeSession = () => {
@@ -74,11 +73,12 @@ const App: React.FC = () => {
     setQuizResult(null);
     setQuestions([]);
     setTopics([]);
+    setIsReviewing(false);
     
     const data = await generateDailyTopics(user.currentDay);
     setTopics(data);
     
-    // Auto generate quiz immediately to have it ready and saved in session
+    // Auto generate quiz immediately
     const qs = await generateQuiz(data);
     setQuestions(qs);
     setQuizAnswers(new Array(qs.length).fill(-1));
@@ -97,15 +97,26 @@ const App: React.FC = () => {
       const updatedUser = saveActiveSession(user, topics, questions, 'QUIZ');
       setUser(updatedUser);
       setView(AppView.QUIZ);
+      setIsReviewing(false);
   };
 
   // Action: Submit Quiz
   const submitQuiz = () => {
     let score = 0;
+    const wrongIndices: number[] = [];
     questions.forEach((q, idx) => {
-      if (quizAnswers[idx] === q.correctIndex) score++;
+      if (quizAnswers[idx] === q.correctIndex) {
+        score++;
+      } else {
+        wrongIndices.push(idx);
+      }
     });
-    setQuizResult({ score, total: questions.length, answers: quizAnswers });
+    setQuizResult({ 
+      score, 
+      total: questions.length, 
+      answers: quizAnswers,
+      wrongQuestionIndices: wrongIndices
+    });
     // Stay on QUIZ view but show results overlay
   };
 
@@ -118,13 +129,17 @@ const App: React.FC = () => {
     const noteContent = await generateStudyNotes(topics, quizResult.score);
     setCurrentNoteContent(noteContent);
 
+    // Collect mistakes from current quiz result
+    const mistakes = quizResult.wrongQuestionIndices.map(idx => questions[idx].question);
+
     const newNote: SavedNote = {
         id: Date.now().toString(),
         day: user.currentDay,
         date: new Date().toLocaleDateString(),
         topics: topics,
         content: noteContent,
-        quizScore: quizResult.score
+        quizScore: quizResult.score,
+        mistakes: mistakes
     };
 
     // Save to persistence
@@ -132,7 +147,7 @@ const App: React.FC = () => {
     setUser(updatedUser);
     
     setLoading(false);
-    setView(AppView.NOTES_GENERATION); // Actually we show the just generated note
+    setView(AppView.NOTES_GENERATION); 
   };
 
   // Action: Comprehensive Exam
@@ -140,9 +155,18 @@ const App: React.FC = () => {
       if (!user || user.savedNotes.length === 0) return;
       setLoading(true);
       setQuizResult(null);
+      setIsReviewing(false);
       
-      const allContent = user.savedNotes.map(n => n.content).join("\n\n");
-      const qs = await generateComprehensiveQuiz(allContent);
+      // 1. Calculate Total Topics and Target Question Count (Total Topics * 2)
+      const allTopics = user.savedNotes.flatMap(n => n.topics);
+      const topicSummaries = allTopics.map(t => `${t.title} (${t.category})`);
+      const targetQuestionCount = allTopics.length * 2;
+
+      // 2. Collect Previous Mistakes
+      const allMistakes = user.savedNotes.flatMap(n => n.mistakes || []);
+
+      // 3. Generate Quiz
+      const qs = await generateComprehensiveQuiz(topicSummaries, allMistakes, targetQuestionCount);
       
       setQuestions(qs);
       setQuizAnswers(new Array(qs.length).fill(-1));
@@ -204,6 +228,9 @@ const App: React.FC = () => {
   const renderHome = () => {
     if (!user) return null;
     const hasSession = topics.length > 0 && (user.activeSession !== null);
+    
+    const totalTopicsLearned = user.savedNotes.reduce((acc, n) => acc + n.topics.length, 0);
+    const canTakeComprehensive = totalTopicsLearned >= 10; // Changed condition to >= 10 topics
 
     return (
       <div className="max-w-5xl mx-auto px-6 py-12">
@@ -229,13 +256,13 @@ const App: React.FC = () => {
              <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl border border-slate-700 shadow-xl relative overflow-hidden group">
                  <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 rounded-full blur-3xl -mr-10 -mt-10"></div>
                  <h3 className="text-2xl font-bold text-white mb-4">今日任务</h3>
-                 <p className="text-slate-400 mb-8">学习 10 个新的 Unity/C# 核心概念，并完成测试生成笔记。</p>
+                 <p className="text-slate-400 mb-8">学习 10 个新的 Unity/C# 核心概念，并完成 20 题的强化训练。</p>
                  <button
                     onClick={startDay}
                     disabled={loading || hasSession}
                     className="w-full py-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg transition-all transform hover:-translate-y-1 disabled:opacity-50 disabled:cursor-not-allowed"
                  >
-                    {loading ? "生成中..." : hasSession ? "请先完成当前课程" : `开始 Day ${user.currentDay}`}
+                    {loading ? "AI 正在生成课程..." : hasSession ? "请先完成当前课程" : `开始 Day ${user.currentDay}`}
                  </button>
              </div>
 
@@ -250,7 +277,7 @@ const App: React.FC = () => {
                         </div>
                         <div className="bg-slate-900 p-4 rounded-lg flex-1 text-center border border-slate-700">
                             <div className="text-2xl font-bold text-green-400">
-                                {user.savedNotes.reduce((acc, n) => acc + n.topics.length, 0)}
+                                {totalTopicsLearned}
                             </div>
                             <div className="text-xs text-slate-500 uppercase">掌握知识点</div>
                         </div>
@@ -266,13 +293,19 @@ const App: React.FC = () => {
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                      </button>
                      
-                     {user.savedNotes.length >= 3 && (
+                     {canTakeComprehensive && (
                          <button 
                             onClick={startComprehensiveExam}
-                            className="w-full py-3 bg-purple-900/50 hover:bg-purple-800/50 border border-purple-500/30 text-purple-200 font-semibold rounded-xl transition-colors"
+                            className="w-full py-3 bg-purple-900/50 hover:bg-purple-800/50 border border-purple-500/30 text-purple-200 font-semibold rounded-xl transition-colors flex flex-col items-center justify-center"
                          >
-                            参加阶段性汇总考试
+                            <span>阶段性汇总考试</span>
+                            <span className="text-xs text-purple-400 mt-1">基于 {totalTopicsLearned} 个知识点生成 {Math.min(totalTopicsLearned * 2, 50)} 道题 (优先错题)</span>
                          </button>
+                     )}
+                     {!canTakeComprehensive && (
+                        <div className="text-center text-xs text-slate-500 pt-2">
+                            学习满 10 个知识点后解锁综合考试
+                        </div>
                      )}
                  </div>
              </div>
@@ -289,7 +322,7 @@ const App: React.FC = () => {
                 <span className="bg-cyan-600 text-xs px-2 py-1 rounded text-white">Day {user?.currentDay}</span>
                 今日核心知识
             </h2>
-            <p className="text-slate-400 mt-1">包含 Unity 引擎、C# 语言与网络基础</p>
+            <p className="text-slate-400 mt-1">包含 Unity 引擎、C# 语言与网络基础 (由浅入深)</p>
         </div>
         <button 
             onClick={enterQuizMode}
@@ -346,7 +379,8 @@ const App: React.FC = () => {
   );
 
   const renderQuiz = (isComprehensive = false) => {
-      if (quizResult && !isComprehensive) {
+      // STATE 1: Result Summary
+      if (quizResult && !isReviewing) {
           return (
             <div className="max-w-2xl mx-auto p-8 text-center pt-20">
                 <div className="inline-block p-6 rounded-full bg-slate-800 border border-slate-700 mb-8">
@@ -355,56 +389,155 @@ const App: React.FC = () => {
                     </div>
                 </div>
                 <h2 className="text-3xl font-bold text-white mb-4">
-                    {quizResult.score === quizResult.total ? "完美通过！🎉" : quizResult.score > quizResult.total / 2 ? "通过测试！👍" : "还需要加强哦 💪"}
+                    {quizResult.score === quizResult.total ? "完美通过！🎉" : quizResult.score > quizResult.total / 2 ? "测试完成！👍" : "还需要加强哦 💪"}
                 </h2>
-                <p className="text-slate-400 mb-10 text-lg">测试已完成，点击下方按钮生成今日的专属复习笔记并保存进度。</p>
-                <button
-                    onClick={generateNotesAction}
-                    className="px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg transition-all shadow-lg hover:shadow-cyan-500/20"
-                >
-                    生成并保存笔记
-                </button>
+                <p className="text-slate-400 mb-10 text-lg">查看详细解析以巩固知识，或直接生成笔记。</p>
+                
+                <div className="flex flex-col gap-4">
+                    <button
+                        onClick={() => setIsReviewing(true)}
+                        className="w-full px-10 py-4 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold text-lg transition-all border border-slate-600"
+                    >
+                        📝 查看错题与解析
+                    </button>
+                    
+                    {isComprehensive ? (
+                         <button
+                            onClick={() => setView(AppView.HOME)}
+                            className="w-full px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg transition-all"
+                        >
+                            返回首页
+                        </button>
+                    ) : (
+                         <button
+                            onClick={generateNotesAction}
+                            className="w-full px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg transition-all shadow-lg hover:shadow-cyan-500/20"
+                        >
+                            生成并保存笔记
+                        </button>
+                    )}
+                </div>
             </div>
           )
       }
       
-      if (quizResult && isComprehensive) {
-           return (
-            <div className="max-w-2xl mx-auto p-8 text-center pt-20">
-                 <h2 className="text-4xl font-bold text-white mb-6">汇总考试结果</h2>
-                 <div className="text-6xl font-black text-purple-400 mb-8">
-                        {quizResult.score} / {quizResult.total}
+      // STATE 2: Review Mode (Read-only with explanations)
+      if (quizResult && isReviewing) {
+          return (
+            <div className="max-w-3xl mx-auto p-6 pb-32">
+                 <div className="mb-8 sticky top-20 bg-slate-900/95 backdrop-blur p-4 z-10 border-b border-slate-700 flex justify-between items-center rounded-xl">
+                    <h2 className="text-2xl font-bold text-white">试卷解析</h2>
+                    <button 
+                         onClick={() => setIsReviewing(false)} // Go back to summary
+                         className="text-cyan-400 hover:text-cyan-300 text-sm font-bold"
+                    >
+                        返回结果页
+                    </button>
                  </div>
-                 <button
-                    onClick={() => setView(AppView.HOME)}
-                    className="px-8 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl"
-                >
-                    返回首页
-                </button>
+                 
+                 <div className="space-y-12">
+                     {questions.map((q, qIdx) => {
+                         const isCorrect = quizAnswers[qIdx] === q.correctIndex;
+                         return (
+                             <div key={qIdx} className={`border rounded-2xl p-8 shadow-lg ${isCorrect ? 'bg-slate-900 border-slate-800' : 'bg-slate-900 border-red-900/30'}`}>
+                                 <div className="flex gap-3 mb-6">
+                                     <span className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full font-bold text-sm ${isCorrect ? 'bg-green-900 text-green-400' : 'bg-red-900 text-red-400'}`}>
+                                         {isCorrect ? '✓' : '✗'}
+                                     </span>
+                                     <div className="flex-1">
+                                         {/* Use MarkdownView here to render properly formatted code in review mode */}
+                                         <div className="prose prose-invert max-w-none prose-p:text-xl prose-p:font-semibold prose-pre:bg-slate-950 prose-pre:border prose-pre:border-slate-800">
+                                            <MarkdownView content={q.question} />
+                                         </div>
+                                     </div>
+                                 </div>
+                                 
+                                 <div className="space-y-3 pl-11">
+                                     {q.options.map((opt, oIdx) => {
+                                         const isSelected = quizAnswers[qIdx] === oIdx;
+                                         const isThisCorrect = q.correctIndex === oIdx;
+                                         
+                                         let optionClass = "bg-slate-800/50 border-slate-700 text-slate-400"; 
+                                         
+                                         if (isThisCorrect) {
+                                             optionClass = "bg-green-900/20 border-green-500/50 text-green-300"; 
+                                         } 
+                                         
+                                         if (isSelected && !isThisCorrect) {
+                                             optionClass = "bg-red-900/20 border-red-500 text-red-300"; 
+                                         }
+                                         
+                                         if (isSelected && isThisCorrect) {
+                                              optionClass = "bg-green-900/40 border-green-500 text-green-200 font-bold"; 
+                                         }
+
+                                         return (
+                                             <div
+                                                key={oIdx}
+                                                className={`w-full text-left p-4 rounded-xl border flex items-start gap-3 ${optionClass}`}
+                                             >
+                                                 <span className="text-xs font-bold pt-0.5 opacity-70">{String.fromCharCode(65 + oIdx)}.</span>
+                                                 <span>{opt}</span>
+                                             </div>
+                                         )
+                                     })}
+                                 </div>
+                                 
+                                 <div className="mt-6 ml-11 bg-slate-800 p-6 rounded-xl border-l-4 border-cyan-500">
+                                     <h4 className="text-cyan-400 font-bold text-sm mb-2 uppercase tracking-wider">💡 解析</h4>
+                                     <p className="text-slate-300 text-sm leading-relaxed">{q.explanation}</p>
+                                 </div>
+                             </div>
+                         )
+                     })}
+                 </div>
+                 
+                 <div className="mt-12 flex justify-center">
+                    {isComprehensive ? (
+                        <button 
+                            onClick={() => setView(AppView.HOME)}
+                            className="px-12 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg shadow-lg"
+                        >
+                            完成复习
+                        </button>
+                    ) : (
+                        <button 
+                            onClick={generateNotesAction}
+                            className="px-12 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg shadow-lg"
+                        >
+                            生成学习笔记
+                        </button>
+                    )}
+                 </div>
             </div>
-           );
+          );
       }
 
+      // STATE 3: Taking Quiz
       return (
         <div className="max-w-3xl mx-auto p-6 pb-32">
-             <div className="mb-8 flex items-center justify-between">
+             <div className="mb-8 flex items-center justify-between sticky top-16 bg-slate-900 py-4 z-10 border-b border-slate-800">
                 <h2 className="text-3xl font-bold text-white flex items-center gap-3">
                     <span className={`rounded-lg px-3 py-1 text-lg ${isComprehensive ? 'bg-purple-900 text-purple-300' : 'bg-cyan-900 text-cyan-300'}`}>
                         {isComprehensive ? '汇总考试' : '每日测试'}
                     </span>
                 </h2>
-                <div className="text-slate-400 font-mono">
-                    已答: {quizAnswers.filter(a => a !== -1).length} / {questions.length}
+                <div className="text-slate-400 font-mono bg-slate-800 px-3 py-1 rounded">
+                    已答: <span className="text-white">{quizAnswers.filter(a => a !== -1).length}</span> / {questions.length}
                 </div>
              </div>
              
              <div className="space-y-10">
                  {questions.map((q, qIdx) => (
                      <div key={qIdx} className="bg-slate-800 border border-slate-700 rounded-2xl p-8 shadow-lg">
-                         <h3 className="text-xl font-semibold text-white mb-6 leading-relaxed">
-                             <span className="text-slate-500 mr-2">{qIdx + 1}.</span>
-                             {q.question}
-                         </h3>
+                         {/* Use MarkdownView here to render properly formatted code in question */}
+                         <div className="mb-6 prose prose-invert max-w-none prose-p:text-xl prose-p:font-semibold prose-p:text-white prose-pre:bg-[#1e1e1e] prose-pre:border prose-pre:border-slate-700">
+                            <div className="flex gap-2">
+                                <span className="text-slate-500 font-semibold text-xl">{qIdx + 1}.</span>
+                                <MarkdownView content={q.question} />
+                            </div>
+                         </div>
+
                          <div className="space-y-3">
                              {q.options.map((opt, oIdx) => (
                                  <button
@@ -500,7 +633,12 @@ const App: React.FC = () => {
                               <div className="flex items-center gap-4">
                                   <span className="bg-cyan-900 text-cyan-300 px-3 py-1 rounded font-mono text-sm">Day {note.day}</span>
                                   <span className="text-slate-400 text-sm">{note.date}</span>
-                                  <span className="text-slate-500 text-sm hidden sm:inline">| 测试得分: {note.quizScore}/5</span>
+                                  <span className="text-slate-500 text-sm hidden sm:inline">| 测试得分: {note.quizScore}/20</span>
+                                  {note.mistakes && note.mistakes.length > 0 && (
+                                      <span className="text-red-400 text-xs border border-red-900/50 px-2 py-0.5 rounded bg-red-900/10">
+                                          错题: {note.mistakes.length}
+                                      </span>
+                                  )}
                               </div>
                               <svg className={`w-5 h-5 text-slate-400 transition-transform ${currentNoteContent === note.content ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                           </div>
