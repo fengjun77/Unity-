@@ -1,13 +1,7 @@
-
 import { GoogleGenAI, Type, Chat } from "@google/genai";
 import { Topic, QuizQuestion } from "../types";
 
-const apiKey = process.env.API_KEY;
-if (!apiKey) {
-  console.error("API_KEY is missing from environment variables.");
-}
-
-const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const MODEL_FAST = "gemini-2.5-flash";
 const MODEL_SMART = "gemini-2.5-flash"; 
