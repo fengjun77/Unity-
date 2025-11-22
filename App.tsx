@@ -20,11 +20,13 @@ const App: React.FC = () => {
   
   // Learning State
   const [topics, setTopics] = useState<Topic[]>([]);
+  const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
   
   // Quiz State
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [quizAnswers, setQuizAnswers] = useState<number[]>([]);
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   
   // Notes State
   const [currentNoteContent, setCurrentNoteContent] = useState<string>("");
@@ -46,9 +48,11 @@ const App: React.FC = () => {
         setQuestions(loadedUser.activeSession.questions);
         if (loadedUser.activeSession.step === 'LEARNING') {
             setView(AppView.LEARNING);
+            setCurrentTopicIndex(0);
         } else if (loadedUser.activeSession.step === 'QUIZ') {
              setQuizAnswers(new Array(loadedUser.activeSession.questions.length).fill(-1));
              setView(AppView.QUIZ);
+             setCurrentQuestionIndex(0);
         }
     } else {
         setView(AppView.HOME);
@@ -62,8 +66,14 @@ const App: React.FC = () => {
   };
 
   const resumeSession = () => {
-      if (topics.length > 0 && questions.length === 0) setView(AppView.LEARNING);
-      if (questions.length > 0) setView(AppView.QUIZ);
+      if (topics.length > 0 && questions.length === 0) {
+          setView(AppView.LEARNING);
+          setCurrentTopicIndex(0);
+      }
+      if (questions.length > 0) {
+          setView(AppView.QUIZ);
+          setCurrentQuestionIndex(0);
+      }
   };
 
   // Action: Start New Day
@@ -74,11 +84,12 @@ const App: React.FC = () => {
     setQuestions([]);
     setTopics([]);
     setIsReviewing(false);
+    setCurrentTopicIndex(0);
     
     const data = await generateDailyTopics(user.currentDay);
     setTopics(data);
     
-    // Auto generate quiz immediately
+    // Auto generate quiz immediately in background/sequentially
     const qs = await generateQuiz(data);
     setQuestions(qs);
     setQuizAnswers(new Array(qs.length).fill(-1));
@@ -97,6 +108,7 @@ const App: React.FC = () => {
       const updatedUser = saveActiveSession(user, topics, questions, 'QUIZ');
       setUser(updatedUser);
       setView(AppView.QUIZ);
+      setCurrentQuestionIndex(0);
       setIsReviewing(false);
   };
 
@@ -170,6 +182,7 @@ const App: React.FC = () => {
       
       setQuestions(qs);
       setQuizAnswers(new Array(qs.length).fill(-1));
+      setCurrentQuestionIndex(0);
       setLoading(false);
       setView(AppView.COMPREHENSIVE_EXAM);
   };
@@ -230,7 +243,7 @@ const App: React.FC = () => {
     const hasSession = topics.length > 0 && (user.activeSession !== null);
     
     const totalTopicsLearned = user.savedNotes.reduce((acc, n) => acc + n.topics.length, 0);
-    const canTakeComprehensive = totalTopicsLearned >= 10; // Changed condition to >= 10 topics
+    const canTakeComprehensive = totalTopicsLearned >= 10; 
 
     return (
       <div className="max-w-5xl mx-auto px-6 py-12">
@@ -262,7 +275,7 @@ const App: React.FC = () => {
                     disabled={loading || hasSession}
                     className="w-full py-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg transition-all transform hover:-translate-y-1 disabled:opacity-50 disabled:cursor-not-allowed"
                  >
-                    {loading ? "AI 正在生成课程..." : hasSession ? "请先完成当前课程" : `开始 Day ${user.currentDay}`}
+                    {loading ? "AI 正在极速生成..." : hasSession ? "请先完成当前课程" : `开始 Day ${user.currentDay}`}
                  </button>
              </div>
 
@@ -314,75 +327,105 @@ const App: React.FC = () => {
     );
   };
 
-  const renderLearning = () => (
-    <div className="max-w-5xl mx-auto p-6 pb-32">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-        <div>
-            <h2 className="text-3xl font-bold text-white flex items-center gap-3">
-                <span className="bg-cyan-600 text-xs px-2 py-1 rounded text-white">Day {user?.currentDay}</span>
-                今日核心知识
-            </h2>
-            <p className="text-slate-400 mt-1">包含 Unity 引擎、C# 语言与网络基础 (由浅入深)</p>
-        </div>
-        <button 
-            onClick={enterQuizMode}
-            className="px-8 py-3 bg-green-600 hover:bg-green-500 text-white rounded-xl font-bold shadow-lg transition-all flex items-center gap-2 hover:scale-105"
-        >
-            学习完毕，开始测试 <span className="text-xl">→</span>
-        </button>
-      </div>
-      
-      <div className="grid gap-8">
-        {topics.map((topic, index) => (
-          <div key={index} className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden shadow-md hover:border-cyan-500/30 transition-all">
-            <div className="p-6 border-b border-slate-700/50 bg-slate-800/50 flex justify-between items-start">
-                <div className="flex items-center gap-3">
-                    <span className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-700 text-cyan-400 font-bold border border-slate-600">{index + 1}</span>
-                    <h3 className="text-xl font-bold text-slate-100">{topic.title}</h3>
+  const renderLearning = () => {
+    if (topics.length === 0) return null;
+    const topic = topics[currentTopicIndex];
+    
+    return (
+        <div className="max-w-4xl mx-auto p-6 pb-32 flex flex-col min-h-[85vh]">
+          {/* Progress Bar */}
+          <div className="mb-8">
+             <div className="flex justify-between text-sm text-slate-400 mb-2">
+                <span>进度</span>
+                <span>{currentTopicIndex + 1} / {topics.length}</span>
+             </div>
+             <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div 
+                    className="h-full bg-cyan-500 transition-all duration-500 ease-out"
+                    style={{ width: `${((currentTopicIndex + 1) / topics.length) * 100}%` }}
+                ></div>
+             </div>
+          </div>
+
+          {/* Header */}
+          <div className="flex justify-between items-end mb-6">
+            <div>
+                <h2 className="text-3xl font-bold text-white">Day {user?.currentDay} 核心知识</h2>
+                <p className="text-slate-400 mt-1">每日精进，积少成多</p>
+            </div>
+          </div>
+          
+          {/* Single Topic Card */}
+          <div className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col animate-fade-in">
+            <div className="p-8 border-b border-slate-700/50 bg-slate-800/50 flex justify-between items-start">
+                <div className="flex items-center gap-4">
+                    <span className="flex items-center justify-center w-10 h-10 rounded-full bg-slate-700 text-cyan-400 font-bold border border-slate-600 text-lg">
+                        {currentTopicIndex + 1}
+                    </span>
+                    <h3 className="text-2xl font-bold text-slate-100">{topic.title}</h3>
                 </div>
                 <div className="flex gap-2">
-                    <span className={`text-xs px-2 py-1 rounded border font-mono ${
+                    <span className={`text-sm px-3 py-1 rounded-full border font-mono ${
                         topic.category === 'Unity' ? 'border-blue-500/30 text-blue-400 bg-blue-900/20' :
                         topic.category === 'C#' ? 'border-purple-500/30 text-purple-400 bg-purple-900/20' :
                         'border-orange-500/30 text-orange-400 bg-orange-900/20'
                     }`}>{topic.category}</span>
-                    <span className={`text-xs px-2 py-1 rounded border ${
+                    <span className={`text-sm px-3 py-1 rounded-full border ${
                         topic.difficulty === '高级' ? 'border-red-500/50 text-red-400' : 
                         topic.difficulty === '中级' ? 'border-yellow-500/50 text-yellow-400' : 
                         'border-green-500/50 text-green-400'
                     }`}>{topic.difficulty}</span>
                 </div>
             </div>
-            <div className="p-6">
-                <p className="text-slate-300 mb-6 leading-relaxed text-lg">{topic.concept}</p>
+            <div className="p-8 flex-1 overflow-y-auto">
+                <p className="text-slate-300 mb-8 leading-loose text-xl">{topic.concept}</p>
                 {topic.exampleCode && (
                 <div className="relative group">
-                    <div className="absolute top-2 right-2 text-xs text-slate-500 font-mono">C# Example</div>
-                    <div className="bg-[#1e1e1e] rounded-lg p-5 border-l-4 border-cyan-600 font-mono text-sm overflow-x-auto text-slate-300 shadow-inner">
+                    <div className="absolute top-3 right-3 text-xs text-slate-500 font-mono px-2 py-1 bg-slate-800 rounded">C# Example</div>
+                    <div className="bg-[#111] rounded-xl p-6 border-l-4 border-cyan-600 font-mono text-sm overflow-x-auto text-slate-300 shadow-inner">
                         <pre className="whitespace-pre-wrap break-words font-mono leading-6">{topic.exampleCode}</pre>
                     </div>
                 </div>
                 )}
             </div>
           </div>
-        ))}
-      </div>
-      <div className="mt-12 text-center">
-        <button 
-            onClick={enterQuizMode}
-            className="px-16 py-5 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white rounded-2xl font-bold shadow-xl text-xl transition-transform hover:-translate-y-1"
-        >
-            开始测试
-        </button>
-      </div>
-    </div>
-  );
+          
+          {/* Navigation Buttons */}
+          <div className="mt-8 flex justify-between gap-4">
+             <button
+                onClick={() => setCurrentTopicIndex(prev => Math.max(0, prev - 1))}
+                disabled={currentTopicIndex === 0}
+                className="px-8 py-4 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-xl font-bold transition-colors flex items-center gap-2"
+             >
+                ← 上一个
+             </button>
+             
+             {currentTopicIndex < topics.length - 1 ? (
+                 <button
+                    onClick={() => setCurrentTopicIndex(prev => Math.min(topics.length - 1, prev + 1))}
+                    className="px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1 flex items-center gap-2"
+                 >
+                    下一个 →
+                 </button>
+             ) : (
+                 <button
+                    onClick={enterQuizMode}
+                    className="px-10 py-4 bg-green-600 hover:bg-green-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:-translate-y-1 flex items-center gap-2"
+                 >
+                    开始测试 ✨
+                 </button>
+             )}
+          </div>
+        </div>
+    );
+  };
 
   const renderQuiz = (isComprehensive = false) => {
-      // STATE 1: Result Summary
+      // STATE 1: Result Summary (Remains the same, list view for Review is typically better, 
+      // but user said "Test questions" need this method. I assume they mean Taking the test.)
       if (quizResult && !isReviewing) {
           return (
-            <div className="max-w-2xl mx-auto p-8 text-center pt-20">
+            <div className="max-w-2xl mx-auto p-8 text-center pt-20 animate-fade-in">
                 <div className="inline-block p-6 rounded-full bg-slate-800 border border-slate-700 mb-8">
                     <div className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">
                         {quizResult.score} <span className="text-2xl text-slate-500 font-normal">/ {quizResult.total}</span>
@@ -421,14 +464,14 @@ const App: React.FC = () => {
           )
       }
       
-      // STATE 2: Review Mode (Read-only with explanations)
+      // STATE 2: Review Mode (List View is better for Reviewing all at once)
       if (quizResult && isReviewing) {
           return (
-            <div className="max-w-3xl mx-auto p-6 pb-32">
-                 <div className="mb-8 sticky top-20 bg-slate-900/95 backdrop-blur p-4 z-10 border-b border-slate-700 flex justify-between items-center rounded-xl">
+            <div className="max-w-3xl mx-auto p-6 pb-32 animate-fade-in">
+                 <div className="mb-8 sticky top-0 bg-slate-900/95 backdrop-blur p-4 z-20 border-b border-slate-700 flex justify-between items-center rounded-b-xl shadow-lg">
                     <h2 className="text-2xl font-bold text-white">试卷解析</h2>
                     <button 
-                         onClick={() => setIsReviewing(false)} // Go back to summary
+                         onClick={() => setIsReviewing(false)} 
                          className="text-cyan-400 hover:text-cyan-300 text-sm font-bold"
                     >
                         返回结果页
@@ -445,7 +488,6 @@ const App: React.FC = () => {
                                          {isCorrect ? '✓' : '✗'}
                                      </span>
                                      <div className="flex-1">
-                                         {/* Use MarkdownView here to render properly formatted code in review mode */}
                                          <div className="prose prose-invert max-w-none prose-p:text-xl prose-p:font-semibold prose-pre:bg-slate-950 prose-pre:border prose-pre:border-slate-800">
                                             <MarkdownView content={q.question} />
                                          </div>
@@ -493,86 +535,106 @@ const App: React.FC = () => {
                  </div>
                  
                  <div className="mt-12 flex justify-center">
-                    {isComprehensive ? (
-                        <button 
-                            onClick={() => setView(AppView.HOME)}
-                            className="px-12 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg shadow-lg"
-                        >
-                            完成复习
-                        </button>
-                    ) : (
-                        <button 
-                            onClick={generateNotesAction}
-                            className="px-12 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg shadow-lg"
-                        >
-                            生成学习笔记
-                        </button>
-                    )}
+                    <button 
+                        onClick={isComprehensive ? () => setView(AppView.HOME) : generateNotesAction}
+                        className="px-12 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold text-lg shadow-lg"
+                    >
+                        {isComprehensive ? "完成复习" : "生成学习笔记"}
+                    </button>
                  </div>
             </div>
           );
       }
 
-      // STATE 3: Taking Quiz
+      // STATE 3: Taking Quiz (Paginated View)
+      if (questions.length === 0) return <Spinner />;
+      const q = questions[currentQuestionIndex];
+
       return (
-        <div className="max-w-3xl mx-auto p-6 pb-32">
-             <div className="mb-8 flex items-center justify-between sticky top-16 bg-slate-900 py-4 z-10 border-b border-slate-800">
-                <h2 className="text-3xl font-bold text-white flex items-center gap-3">
-                    <span className={`rounded-lg px-3 py-1 text-lg ${isComprehensive ? 'bg-purple-900 text-purple-300' : 'bg-cyan-900 text-cyan-300'}`}>
-                        {isComprehensive ? '汇总考试' : '每日测试'}
-                    </span>
-                </h2>
-                <div className="text-slate-400 font-mono bg-slate-800 px-3 py-1 rounded">
-                    已答: <span className="text-white">{quizAnswers.filter(a => a !== -1).length}</span> / {questions.length}
+        <div className="max-w-3xl mx-auto p-6 pb-32 flex flex-col min-h-[85vh]">
+             {/* Header & Progress */}
+             <div className="mb-6">
+                <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                        <span className={`rounded-lg px-3 py-1 text-sm ${isComprehensive ? 'bg-purple-900 text-purple-300' : 'bg-cyan-900 text-cyan-300'}`}>
+                            {isComprehensive ? '汇总考试' : '每日测试'}
+                        </span>
+                    </h2>
+                    <div className="text-slate-400 font-mono text-sm">
+                        <span className="text-white font-bold">{currentQuestionIndex + 1}</span> / {questions.length}
+                    </div>
+                </div>
+                <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div 
+                        className={`h-full transition-all duration-300 ease-out ${isComprehensive ? 'bg-purple-500' : 'bg-cyan-500'}`}
+                        style={{ width: `${((currentQuestionIndex + 1) / questions.length) * 100}%` }}
+                    ></div>
                 </div>
              </div>
              
-             <div className="space-y-10">
-                 {questions.map((q, qIdx) => (
-                     <div key={qIdx} className="bg-slate-800 border border-slate-700 rounded-2xl p-8 shadow-lg">
-                         {/* Use MarkdownView here to render properly formatted code in question */}
-                         <div className="mb-6 prose prose-invert max-w-none prose-p:text-xl prose-p:font-semibold prose-p:text-white prose-pre:bg-[#1e1e1e] prose-pre:border prose-pre:border-slate-700">
-                            <div className="flex gap-2">
-                                <span className="text-slate-500 font-semibold text-xl">{qIdx + 1}.</span>
-                                <MarkdownView content={q.question} />
-                            </div>
-                         </div>
+             {/* Single Question Card */}
+             <div className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl p-8 shadow-2xl flex flex-col animate-fade-in">
+                 <div className="mb-8 prose prose-invert max-w-none prose-p:text-xl prose-p:font-semibold prose-p:text-white prose-pre:bg-[#1e1e1e] prose-pre:border prose-pre:border-slate-700">
+                    <div className="flex gap-4">
+                        <span className="text-slate-500 font-semibold text-2xl">{currentQuestionIndex + 1}.</span>
+                        <div className="flex-1">
+                            <MarkdownView content={q.question} />
+                        </div>
+                    </div>
+                 </div>
 
-                         <div className="space-y-3">
-                             {q.options.map((opt, oIdx) => (
-                                 <button
-                                    key={oIdx}
-                                    onClick={() => {
-                                        const newAnswers = [...quizAnswers];
-                                        newAnswers[qIdx] = oIdx;
-                                        setQuizAnswers(newAnswers);
-                                    }}
-                                    className={`w-full text-left p-4 rounded-xl border transition-all flex items-start gap-3 group ${
-                                        quizAnswers[qIdx] === oIdx 
-                                        ? 'bg-cyan-900/40 border-cyan-500 text-cyan-100 shadow-[0_0_15px_rgba(6,182,212,0.15)]' 
-                                        : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'
-                                    }`}
-                                 >
-                                     <span className={`flex-shrink-0 w-6 h-6 rounded flex items-center justify-center text-xs font-bold border ${
-                                         quizAnswers[qIdx] === oIdx ? 'border-cyan-400 text-cyan-400' : 'border-slate-600 text-slate-600 group-hover:border-slate-500'
-                                     }`}>
-                                         {String.fromCharCode(65 + oIdx)}
-                                     </span> 
-                                     <span className="pt-0.5">{opt}</span>
-                                 </button>
-                             ))}
-                         </div>
-                     </div>
-                 ))}
+                 <div className="space-y-4 flex-1">
+                     {q.options.map((opt, oIdx) => (
+                         <button
+                            key={oIdx}
+                            onClick={() => {
+                                const newAnswers = [...quizAnswers];
+                                newAnswers[currentQuestionIndex] = oIdx;
+                                setQuizAnswers(newAnswers);
+                            }}
+                            className={`w-full text-left p-5 rounded-xl border transition-all flex items-start gap-4 group ${
+                                quizAnswers[currentQuestionIndex] === oIdx 
+                                ? 'bg-cyan-900/40 border-cyan-500 text-cyan-100 shadow-[0_0_15px_rgba(6,182,212,0.15)] transform scale-[1.01]' 
+                                : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'
+                            }`}
+                         >
+                             <span className={`flex-shrink-0 w-8 h-8 rounded flex items-center justify-center text-sm font-bold border transition-colors ${
+                                 quizAnswers[currentQuestionIndex] === oIdx ? 'border-cyan-400 text-cyan-400 bg-cyan-900/50' : 'border-slate-600 text-slate-600 group-hover:border-slate-500'
+                             }`}>
+                                 {String.fromCharCode(65 + oIdx)}
+                             </span> 
+                             <span className="pt-1 text-lg">{opt}</span>
+                         </button>
+                     ))}
+                 </div>
              </div>
-             <div className="mt-12 flex justify-end">
+             
+             {/* Navigation */}
+             <div className="mt-8 flex justify-between gap-4">
                  <button
-                    onClick={submitQuiz}
-                    disabled={quizAnswers.includes(-1)}
-                    className="px-10 py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-white rounded-xl font-bold shadow-lg transition-colors text-lg"
+                     onClick={() => setCurrentQuestionIndex(prev => Math.max(0, prev - 1))}
+                     disabled={currentQuestionIndex === 0}
+                     className="px-8 py-4 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-xl font-bold transition-colors"
                  >
-                    提交试卷
+                     ← 上一题
                  </button>
+
+                 {currentQuestionIndex < questions.length - 1 ? (
+                     <button
+                         onClick={() => setCurrentQuestionIndex(prev => Math.min(questions.length - 1, prev + 1))}
+                         className="px-10 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1"
+                     >
+                         下一题 →
+                     </button>
+                 ) : (
+                     <button
+                        onClick={submitQuiz}
+                        disabled={quizAnswers.includes(-1)}
+                        className="px-10 py-4 bg-green-600 hover:bg-green-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-white rounded-xl font-bold shadow-lg transition-colors text-lg"
+                     >
+                        提交试卷 ✅
+                     </button>
+                 )}
              </div>
         </div>
       );
