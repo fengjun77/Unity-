@@ -5,6 +5,8 @@ interface Props {
 }
 
 export const MarkdownView: React.FC<Props> = ({ content }) => {
+  if (!content) return null;
+
   // Split content into code blocks and text blocks
   const parts = content.split(/(```[\s\S]*?```)/g);
 

@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, Chat } from "@google/genai";
-import { Topic, QuizQuestion } from "../types";
+import { Topic, QuizQuestion, TrackType } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -12,26 +12,54 @@ const MODEL_SMART = "gemini-2.5-flash";
  * @param day The current day number.
  * @param startIndex The starting index for the topics (e.g., 1 for the first topic).
  * @param count How many topics to generate in this batch.
+ * @param existingTitles List of titles already generated to avoid duplicates.
+ * @param track The learning track (Unity or C# Algo).
  */
-export const generateTopicBatch = async (day: number, startIndex: number, count: number): Promise<Topic[]> => {
+export const generateTopicBatch = async (
+  day: number, 
+  startIndex: number, 
+  count: number,
+  existingTitles: string[] = [],
+  track: TrackType = 'UNITY'
+): Promise<Topic[]> => {
   try {
-    const prompt = `为第 ${day} 天的学习计划生成 ${count} 个 Unity 游戏开发面试知识点。
-    从第 ${startIndex} 个知识点开始 (序号 ${startIndex} - ${startIndex + count - 1})。
-      
-    要求：
-    1. **内容详尽**：不要简化！必须包含该知识点的全部重要内容、底层原理。
-    2. **面试八股文**：在 concept 中必须包含 "### 面试必问" 章节，列出 2-3 个相关面试题（含答案），难度由浅入深。
-    3. **难度分布**：
-       - 如果序号 1-3：基础概念
-       - 如果序号 4-7：进阶/实战
-       - 如果序号 8-10：底层架构/源码分析
-    4. **代码示例**：代码必须详细，关键部分要有注释，使用 \\n 换行。
+    const avoidContext = existingTitles.length > 0 
+        ? `\n\n**重要提示**：前序已生成的知识点如下，请**绝对不要重复**，并确保新生成的内容与它们衔接自然：${existingTitles.join(" | ")}` 
+        : "";
 
-    请确保 JSON 返回格式正确。`;
+    let prompt = "";
+    let categoryEnum = ["Unity", "C#", "Network"];
+
+    if (track === 'UNITY') {
+        prompt = `为第 ${day} 天的学习计划生成 ${count} 个 Unity 游戏开发面试知识点。
+        本次生成序号：${startIndex} 到 ${startIndex + count - 1}。
+        ${avoidContext}
+        
+        要求：
+        1. **内容详尽**：包含该知识点的全部重要内容、底层原理、源码分析。
+        2. **面试八股文**：concept 中必须包含 "### 面试必问" 章节，列出 2-3 个面试题。
+        3. **难度分布**：序号 1-3 基础，4-7 进阶，8-10 底层架构。
+        4. **代码示例**：C# 代码必须详细，使用 \\n 换行。`;
+    } else {
+        categoryEnum = ["C#", "Algorithm", "DataStructure"];
+        prompt = `为第 ${day} 天的学习计划生成 ${count} 个 C# 高级编程与算法面试知识点。
+        本次生成序号：${startIndex} 到 ${startIndex + count - 1}。
+        ${avoidContext}
+
+        重点领域：
+        - C# 语言特性 (GC, 多线程, 反射, IL)
+        - 常用数据结构 (Dictionary 底层, 链表, 树, 堆)
+        - 经典算法 (排序, 寻路, 动态规划)
+        
+        要求：
+        1. **深度优先**：解释 CLR 实现原理或算法的时间复杂度。
+        2. **面试视角**：concept 中包含 "### 高频考点"。
+        3. **代码示例**：必须提供完整的 C# 实现代码。`;
+    }
 
     const response = await ai.models.generateContent({
       model: MODEL_FAST,
-      contents: prompt,
+      contents: prompt + "\n请确保 JSON 返回格式正确。",
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -40,7 +68,7 @@ export const generateTopicBatch = async (day: number, startIndex: number, count:
             type: Type.OBJECT,
             properties: {
               title: { type: Type.STRING, description: "标题" },
-              category: { type: Type.STRING, enum: ["Unity", "C#", "Network"] },
+              category: { type: Type.STRING, enum: categoryEnum },
               concept: { type: Type.STRING, description: "详细解释 + 面试八股文 (Markdown)" },
               exampleCode: { type: Type.STRING, description: "完整代码片段 (带\\n)" },
               difficulty: { type: Type.STRING, enum: ["初级", "中级", "高级"] },
@@ -62,11 +90,10 @@ export const generateTopicBatch = async (day: number, startIndex: number, count:
 
 /**
  * Generates quiz questions specifically for the provided list of topics.
- * Usually called in background after topics are loaded.
  */
 export const generateQuizForBatch = async (topics: Topic[]): Promise<QuizQuestion[]> => {
   if (topics.length === 0) return [];
-  const topicsContext = JSON.stringify(topics.map(t => ({ title: t.title, concept: t.concept.substring(0, 500) }))); // Trim concept to save tokens context
+  const topicsContext = JSON.stringify(topics.map(t => ({ title: t.title, concept: t.concept.substring(0, 500) }))); 
   
   try {
     const questionCount = topics.length * 2; // 2 questions per topic
@@ -107,16 +134,6 @@ export const generateQuizForBatch = async (topics: Topic[]): Promise<QuizQuestio
   }
 };
 
-// Kept for compatibility if needed, but App.tsx will mostly use generateTopicBatch
-export const generateDailyTopics = async (day: number): Promise<Topic[]> => {
-  return generateTopicBatch(day, 1, 10);
-};
-
-// Kept for compatibility
-export const generateQuiz = async (topics: Topic[]): Promise<QuizQuestion[]> => {
-  return generateQuizForBatch(topics);
-};
-
 export const generateComprehensiveQuiz = async (
   topicsSummary: string[], 
   previousMistakes: string[],
@@ -130,7 +147,7 @@ export const generateComprehensiveQuiz = async (
       ? `重点考察错题领域：${previousMistakes.slice(0, 10).join("; ")}...` 
       : "全面考察。";
 
-    const prompt = `生成 ${safeCount} 道 Unity 综合面试题。
+    const prompt = `生成 ${safeCount} 道面试题。
     
     范围：${topicsStr}
     要求：

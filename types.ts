@@ -9,12 +9,14 @@ export enum AppView {
   COMPREHENSIVE_EXAM = 'COMPREHENSIVE_EXAM',
 }
 
+export type TrackType = 'UNITY' | 'CSHARP_ALGO';
+
 export interface Topic {
   title: string;
   concept: string;
   exampleCode?: string;
   difficulty: '初级' | '中级' | '高级';
-  category?: 'Unity' | 'C#' | 'Network';
+  category?: 'Unity' | 'C#' | 'Network' | 'Algorithm' | 'DataStructure';
 }
 
 export interface QuizQuestion {
@@ -45,16 +47,22 @@ export interface SavedNote {
   content: string;
   quizScore: number;
   mistakes?: string[]; // Array of question texts that were answered incorrectly
+  track: TrackType; // Added to distinguish notes
 }
 
 export interface UserData {
   username: string;
-  currentDay: number;
+  // Replaced simple currentDay with progress object
+  progress: {
+    [key in TrackType]: number;
+  };
+  currentTrack: TrackType; 
   savedNotes: SavedNote[];
   // Simple state persistence for the current active session
   activeSession?: {
     topics: Topic[];
     questions: QuizQuestion[];
     step: 'LEARNING' | 'QUIZ';
+    track: TrackType;
   } | null;
 }
