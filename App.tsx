@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AppView, Topic, QuizQuestion, QuizResult, UserData, SavedNote, TrackType } from './types';
 import { generateTopicBatch, generateQuizForBatch, generateStudyNotes, generateComprehensiveQuiz } from './services/geminiService';
@@ -127,19 +128,32 @@ const App: React.FC = () => {
         });
 
         // 2. Fetch Remaining Topics in Background
+        // We use an IIFE here but we make it slower and more robust to rate limits
         (async () => {
             let loadedTitles = batch1.map(t => t.title);
             
             for (let i = 2; i <= dailyTopicCount; i++) {
-                const nextBatch = await generateTopicBatch(currentDay, i, 1, loadedTitles, user.currentTrack);
-                
-                if (nextBatch.length > 0) {
-                    const newTopic = nextBatch[0];
-                    loadedTitles.push(newTopic.title);
-                    setTopics(prev => [...prev, newTopic]);
-                    generateQuizForBatch([newTopic]).then(qs => {
+                // DELAY: Wait 3 seconds between each topic generation to respect API Quota (RPM)
+                await new Promise(r => setTimeout(r, 3000));
+
+                try {
+                    const nextBatch = await generateTopicBatch(currentDay, i, 1, loadedTitles, user.currentTrack);
+                    
+                    if (nextBatch.length > 0) {
+                        const newTopic = nextBatch[0];
+                        loadedTitles.push(newTopic.title);
+                        setTopics(prev => [...prev, newTopic]);
+                        
+                        // SERIALIZE: Wait for quiz generation before proceeding to next topic
+                        // This prevents firing multiple quiz generation requests in parallel
+                        await new Promise(r => setTimeout(r, 1000));
+                        const qs = await generateQuizForBatch([newTopic]);
                         setQuestions(prev => [...prev, ...qs]);
-                    });
+                    }
+                } catch (e) {
+                    console.warn("Background fetch hit an error (likely quota), stopping background load for now.", e);
+                    // Break the loop so we don't keep hammering if we are totally blocked
+                    break;
                 }
             }
         })();

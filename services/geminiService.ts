@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Type, Chat } from "@google/genai";
+import { GoogleGenAI, Type, Chat, GenerateContentResponse } from "@google/genai";
 import { Topic, QuizQuestion, TrackType } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -7,13 +6,34 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const MODEL_FAST = "gemini-2.5-flash";
 const MODEL_SMART = "gemini-2.5-flash"; 
 
+// Helper: Wait function
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Wraps an API call with retry logic for handling Rate Limit (429) errors.
+ */
+async function runWithRetry<T>(
+  fn: () => Promise<T>, 
+  retries = 3, 
+  backoff = 2000
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const msg = error.toString().toLowerCase();
+    const isRateLimit = msg.includes("429") || msg.includes("quota") || msg.includes("resource_exhausted") || error.status === 429;
+    
+    if (isRateLimit && retries > 0) {
+      console.warn(`API Quota hit (429). Retrying in ${backoff}ms...`);
+      await delay(backoff);
+      return runWithRetry(fn, retries - 1, backoff * 2);
+    }
+    throw error;
+  }
+}
+
 /**
  * Generates a batch of topics.
- * @param day The current day number.
- * @param startIndex The starting index for the topics (e.g., 1 for the first topic).
- * @param count How many topics to generate in this batch.
- * @param existingTitles List of titles already generated to avoid duplicates.
- * @param track The learning track (Unity or C# Algo).
  */
 export const generateTopicBatch = async (
   day: number, 
@@ -57,7 +77,7 @@ export const generateTopicBatch = async (
         3. **代码示例**：必须提供完整的 C# 实现代码。`;
     }
 
-    const response = await ai.models.generateContent({
+    const response = await runWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: MODEL_FAST,
       contents: prompt + "\n请确保 JSON 返回格式正确。",
       config: {
@@ -77,7 +97,7 @@ export const generateTopicBatch = async (
           },
         },
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return [];
@@ -97,7 +117,7 @@ export const generateQuizForBatch = async (topics: Topic[]): Promise<QuizQuestio
   
   try {
     const questionCount = topics.length * 2; // 2 questions per topic
-    const response = await ai.models.generateContent({
+    const response = await runWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: MODEL_FAST,
       contents: `基于以下知识点创建 ${questionCount} 道面试题（简体中文）：
       ${topicsContext}
@@ -123,7 +143,7 @@ export const generateQuizForBatch = async (topics: Topic[]): Promise<QuizQuestio
           },
         },
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return [];
@@ -157,7 +177,7 @@ export const generateComprehensiveQuiz = async (
     
     返回 JSON。`;
 
-    const response = await ai.models.generateContent({
+    const response = await runWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: MODEL_SMART, 
       contents: prompt,
       config: {
@@ -176,7 +196,7 @@ export const generateComprehensiveQuiz = async (
           },
         },
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return [];
@@ -191,7 +211,7 @@ export const generateStudyNotes = async (topics: Topic[], quizScore: number): Pr
   const topicsJson = JSON.stringify(topics.map(t => ({ title: t.title, concept: t.concept.substring(0, 1000) })));
   
   try {
-    const response = await ai.models.generateContent({
+    const response = await runWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: MODEL_SMART,
       contents: `学习内容：${topicsJson}。
       得分 ${quizScore}。
@@ -201,7 +221,7 @@ export const generateStudyNotes = async (topics: Topic[], quizScore: number): Pr
       1. 结构清晰，标题明确。
       2. **代码块必须竖向排列**。
       3. 包含 "面试官常问" 和 "底层原理" 总结。`,
-    });
+    }));
     
     return response.text || "无法生成笔记。";
   } catch (error) {
@@ -224,10 +244,11 @@ export const startChatSession = () => {
 export const sendMessageToChat = async (message: string): Promise<string> => {
   if (!chatSession) startChatSession();
   try {
-    const response = await chatSession!.sendMessage({ message });
+    // For chat, we also want basic retry but usually chat is interactive so maybe less aggressive
+    const response = await runWithRetry<GenerateContentResponse>(() => chatSession!.sendMessage({ message }), 2, 1000);
     return response.text || "";
   } catch (error) {
     console.error("Chat error:", error);
-    return "连接错误，请稍后再试。";
+    return "连接错误或配额不足，请稍后再试。";
   }
 };
