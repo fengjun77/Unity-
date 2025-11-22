@@ -7,18 +7,25 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const MODEL_FAST = "gemini-2.5-flash";
 const MODEL_SMART = "gemini-2.5-flash"; 
 
-export const generateDailyTopics = async (day: number): Promise<Topic[]> => {
+/**
+ * Generates a batch of topics.
+ * @param day The current day number.
+ * @param startIndex The starting index for the topics (e.g., 1 for the first topic).
+ * @param count How many topics to generate in this batch.
+ */
+export const generateTopicBatch = async (day: number, startIndex: number, count: number): Promise<Topic[]> => {
   try {
-    const prompt = `为第 ${day} 天的学习计划生成 10 个 Unity 游戏开发面试知识点。
+    const prompt = `为第 ${day} 天的学习计划生成 ${count} 个 Unity 游戏开发面试知识点。
+    从第 ${startIndex} 个知识点开始 (序号 ${startIndex} - ${startIndex + count - 1})。
       
     要求：
-    1. **极速响应**：概念解释必须**精炼**（控制在 50 字以内），不要长篇大论。
-    2. **难度循序渐进**：前 3 个基础，中 4 个进阶，后 3 个底层/架构。
-    3. **内容配比**：
-       - 50% Unity (生命周期, 物理, 渲染, UI, ECS)
-       - 30% C# (GC, 委托, 多线程, LINQ)
-       - 20% 网络 (TCP/UDP, Socket, 同步)
-    4. **代码示例**：必须简短且关键，必须包含换行符。
+    1. **内容详尽**：不要简化！必须包含该知识点的全部重要内容、底层原理。
+    2. **面试八股文**：在 concept 中必须包含 "### 面试必问" 章节，列出 2-3 个相关面试题（含答案），难度由浅入深。
+    3. **难度分布**：
+       - 如果序号 1-3：基础概念
+       - 如果序号 4-7：进阶/实战
+       - 如果序号 8-10：底层架构/源码分析
+    4. **代码示例**：代码必须详细，关键部分要有注释，使用 \\n 换行。
 
     请确保 JSON 返回格式正确。`;
 
@@ -34,8 +41,8 @@ export const generateDailyTopics = async (day: number): Promise<Topic[]> => {
             properties: {
               title: { type: Type.STRING, description: "标题" },
               category: { type: Type.STRING, enum: ["Unity", "C#", "Network"] },
-              concept: { type: Type.STRING, description: "极简解释 (1-2句话)" },
-              exampleCode: { type: Type.STRING, description: "核心代码片段 (带\\n)" },
+              concept: { type: Type.STRING, description: "详细解释 + 面试八股文 (Markdown)" },
+              exampleCode: { type: Type.STRING, description: "完整代码片段 (带\\n)" },
               difficulty: { type: Type.STRING, enum: ["初级", "中级", "高级"] },
             },
             required: ["title", "concept", "difficulty", "category"],
@@ -48,24 +55,31 @@ export const generateDailyTopics = async (day: number): Promise<Topic[]> => {
     if (!text) return [];
     return JSON.parse(text) as Topic[];
   } catch (error) {
-    console.error("Error generating topics:", error);
+    console.error("Error generating topic batch:", error);
     return [];
   }
 };
 
-export const generateQuiz = async (topics: Topic[]): Promise<QuizQuestion[]> => {
-  const topicsContext = JSON.stringify(topics);
+/**
+ * Generates quiz questions specifically for the provided list of topics.
+ * Usually called in background after topics are loaded.
+ */
+export const generateQuizForBatch = async (topics: Topic[]): Promise<QuizQuestion[]> => {
+  if (topics.length === 0) return [];
+  const topicsContext = JSON.stringify(topics.map(t => ({ title: t.title, concept: t.concept.substring(0, 500) }))); // Trim concept to save tokens context
   
   try {
+    const questionCount = topics.length * 2; // 2 questions per topic
     const response = await ai.models.generateContent({
       model: MODEL_FAST,
-      contents: `基于以下知识点创建 20 道面试题（简体中文）：
+      contents: `基于以下知识点创建 ${questionCount} 道面试题（简体中文）：
       ${topicsContext}
       
       要求：
-      1. **代码格式**：JSON 字符串中必须用 \\n 换行。
-      2. **题型多样**：单选、代码分析、判断、场景设计。
-      3. **解析**：解释要精辟。`,
+      1. **题量**：每个知识点对应 2 道题。
+      2. **代码格式**：JSON 字符串中必须用 \\n 换行。
+      3. **题型**：单选或代码输出预测。
+      4. **解析**：解释要精辟，指出坑点。`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -88,19 +102,27 @@ export const generateQuiz = async (topics: Topic[]): Promise<QuizQuestion[]> => 
     if (!text) return [];
     return JSON.parse(text) as QuizQuestion[];
   } catch (error) {
-    console.error("Error generating quiz:", error);
+    console.error("Error generating quiz batch:", error);
     return [];
   }
 };
 
-// Updated Comprehensive Exam to accept mistakes and dynamic count
+// Kept for compatibility if needed, but App.tsx will mostly use generateTopicBatch
+export const generateDailyTopics = async (day: number): Promise<Topic[]> => {
+  return generateTopicBatch(day, 1, 10);
+};
+
+// Kept for compatibility
+export const generateQuiz = async (topics: Topic[]): Promise<QuizQuestion[]> => {
+  return generateQuizForBatch(topics);
+};
+
 export const generateComprehensiveQuiz = async (
   topicsSummary: string[], 
   previousMistakes: string[],
   questionCount: number
 ): Promise<QuizQuestion[]> => {
   try {
-    // Cap question count to avoid timeouts (e.g., max 50)
     const safeCount = Math.min(questionCount, 50);
     
     const topicsStr = topicsSummary.join(", ");
@@ -149,7 +171,7 @@ export const generateComprehensiveQuiz = async (
 };
 
 export const generateStudyNotes = async (topics: Topic[], quizScore: number): Promise<string> => {
-  const topicsJson = JSON.stringify(topics);
+  const topicsJson = JSON.stringify(topics.map(t => ({ title: t.title, concept: t.concept.substring(0, 1000) })));
   
   try {
     const response = await ai.models.generateContent({
@@ -161,7 +183,7 @@ export const generateStudyNotes = async (topics: Topic[], quizScore: number): Pr
       要求：
       1. 结构清晰，标题明确。
       2. **代码块必须竖向排列**。
-      3. 包含 "面试官常问" 和 "底层原理"。`,
+      3. 包含 "面试官常问" 和 "底层原理" 总结。`,
     });
     
     return response.text || "无法生成笔记。";

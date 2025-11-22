@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { AppView, Topic, QuizQuestion, QuizResult, UserData, SavedNote } from './types';
-import { generateDailyTopics, generateQuiz, generateStudyNotes, generateComprehensiveQuiz } from './services/geminiService';
+import { generateTopicBatch, generateQuizForBatch, generateStudyNotes, generateComprehensiveQuiz } from './services/geminiService';
 import { loadUser, saveUser, completeDay, saveActiveSession, clearActiveSession, getAllUsers } from './services/storage';
 import { Spinner } from './components/Spinner';
 import { ChatWidget } from './components/ChatWidget';
@@ -21,6 +21,7 @@ const App: React.FC = () => {
   // Learning State
   const [topics, setTopics] = useState<Topic[]>([]);
   const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
+  const DAILY_TOPIC_COUNT = 10; // Target count
   
   // Quiz State
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);
@@ -50,7 +51,9 @@ const App: React.FC = () => {
             setView(AppView.LEARNING);
             setCurrentTopicIndex(0);
         } else if (loadedUser.activeSession.step === 'QUIZ') {
-             setQuizAnswers(new Array(loadedUser.activeSession.questions.length).fill(-1));
+             // Re-initialize answers array if resuming
+             const currentAnswers = new Array(loadedUser.activeSession.questions.length).fill(-1);
+             setQuizAnswers(currentAnswers);
              setView(AppView.QUIZ);
              setCurrentQuestionIndex(0);
         }
@@ -76,35 +79,67 @@ const App: React.FC = () => {
       }
   };
 
-  // Action: Start New Day
+  // Action: Start New Day (Progressive Loading)
   const startDay = async () => {
     if (!user) return;
     setLoading(true);
     setQuizResult(null);
     setQuestions([]);
-    setTopics([]);
+    setTopics([]); // Clear previous
     setIsReviewing(false);
     setCurrentTopicIndex(0);
     
-    const data = await generateDailyTopics(user.currentDay);
-    setTopics(data);
-    
-    // Auto generate quiz immediately in background/sequentially
-    const qs = await generateQuiz(data);
-    setQuestions(qs);
-    setQuizAnswers(new Array(qs.length).fill(-1));
-    
-    // Save Session
-    const updatedUser = saveActiveSession(user, data, qs, 'LEARNING');
-    setUser(updatedUser);
+    try {
+        // 1. Fetch First Batch (Topics 1-2) - FAST
+        const batch1 = await generateTopicBatch(user.currentDay, 1, 2);
+        setTopics(batch1);
+        setLoading(false); // Enable UI immediately
+        setView(AppView.LEARNING);
 
-    setLoading(false);
-    setView(AppView.LEARNING);
+        // Save session after first batch
+        let currentTopics = batch1;
+        saveActiveSession(user, currentTopics, [], 'LEARNING');
+        
+        // 1a. Generate Quiz for Batch 1 (Background)
+        generateQuizForBatch(batch1).then(qs => {
+             setQuestions(prev => [...prev, ...qs]);
+             // Don't overwrite answers if user somehow started? Usually answers are init on enterQuiz
+        });
+
+        // 2. Fetch Remaining Batch (Topics 3-10) - BACKGROUND
+        const batch2 = await generateTopicBatch(user.currentDay, 3, 8);
+        
+        // Update State
+        setTopics(prev => {
+            const newTopics = [...prev, ...batch2];
+            currentTopics = newTopics;
+            return newTopics;
+        });
+
+        // Save session update
+        saveActiveSession(user, currentTopics, [], 'LEARNING');
+
+        // 2a. Generate Quiz for Batch 2 (Background)
+        generateQuizForBatch(batch2).then(qs => {
+             setQuestions(prev => {
+                 const newQs = [...prev, ...qs];
+                 saveActiveSession(user, currentTopics, newQs, 'LEARNING');
+                 return newQs;
+             });
+        });
+
+    } catch (e) {
+        console.error("Error starting day", e);
+        setLoading(false);
+    }
   };
 
   // Action: Go to Quiz
   const enterQuizMode = () => {
       if (!user) return;
+      // Initialize answers array based on currently loaded questions
+      setQuizAnswers(new Array(questions.length).fill(-1));
+      
       const updatedUser = saveActiveSession(user, topics, questions, 'QUIZ');
       setUser(updatedUser);
       setView(AppView.QUIZ);
@@ -169,15 +204,11 @@ const App: React.FC = () => {
       setQuizResult(null);
       setIsReviewing(false);
       
-      // 1. Calculate Total Topics and Target Question Count (Total Topics * 2)
       const allTopics = user.savedNotes.flatMap(n => n.topics);
       const topicSummaries = allTopics.map(t => `${t.title} (${t.category})`);
       const targetQuestionCount = allTopics.length * 2;
-
-      // 2. Collect Previous Mistakes
       const allMistakes = user.savedNotes.flatMap(n => n.mistakes || []);
 
-      // 3. Generate Quiz
       const qs = await generateComprehensiveQuiz(topicSummaries, allMistakes, targetQuestionCount);
       
       setQuestions(qs);
@@ -240,7 +271,7 @@ const App: React.FC = () => {
 
   const renderHome = () => {
     if (!user) return null;
-    const hasSession = topics.length > 0 && (user.activeSession !== null);
+    const hasSession = (user.activeSession !== null) && (user.activeSession.topics.length > 0);
     
     const totalTopicsLearned = user.savedNotes.reduce((acc, n) => acc + n.topics.length, 0);
     const canTakeComprehensive = totalTopicsLearned >= 10; 
@@ -328,7 +359,8 @@ const App: React.FC = () => {
   };
 
   const renderLearning = () => {
-    if (topics.length === 0) return null;
+    // If topics are still loading the first batch, we might show spinner (handled by App loading state).
+    // But if we are in progressive loading, topics[currentTopicIndex] might be undefined.
     const topic = topics[currentTopicIndex];
     
     return (
@@ -337,12 +369,12 @@ const App: React.FC = () => {
           <div className="mb-8">
              <div className="flex justify-between text-sm text-slate-400 mb-2">
                 <span>进度</span>
-                <span>{currentTopicIndex + 1} / {topics.length}</span>
+                <span>{currentTopicIndex + 1} / {DAILY_TOPIC_COUNT}</span>
              </div>
              <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
                 <div 
                     className="h-full bg-cyan-500 transition-all duration-500 ease-out"
-                    style={{ width: `${((currentTopicIndex + 1) / topics.length) * 100}%` }}
+                    style={{ width: `${((currentTopicIndex + 1) / DAILY_TOPIC_COUNT) * 100}%` }}
                 ></div>
              </div>
           </div>
@@ -353,42 +385,59 @@ const App: React.FC = () => {
                 <h2 className="text-3xl font-bold text-white">Day {user?.currentDay} 核心知识</h2>
                 <p className="text-slate-400 mt-1">每日精进，积少成多</p>
             </div>
+            {/* Indication if background loading is happening */}
+            {topics.length < DAILY_TOPIC_COUNT && (
+                 <div className="flex items-center gap-2 text-xs text-cyan-400 animate-pulse bg-cyan-900/20 px-3 py-1 rounded-full border border-cyan-800">
+                    <div className="w-2 h-2 bg-cyan-400 rounded-full"></div>
+                    后台生成中 ({topics.length}/{DAILY_TOPIC_COUNT})
+                 </div>
+            )}
           </div>
           
-          {/* Single Topic Card */}
-          <div className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col animate-fade-in">
-            <div className="p-8 border-b border-slate-700/50 bg-slate-800/50 flex justify-between items-start">
-                <div className="flex items-center gap-4">
-                    <span className="flex items-center justify-center w-10 h-10 rounded-full bg-slate-700 text-cyan-400 font-bold border border-slate-600 text-lg">
-                        {currentTopicIndex + 1}
-                    </span>
-                    <h3 className="text-2xl font-bold text-slate-100">{topic.title}</h3>
-                </div>
-                <div className="flex gap-2">
-                    <span className={`text-sm px-3 py-1 rounded-full border font-mono ${
-                        topic.category === 'Unity' ? 'border-blue-500/30 text-blue-400 bg-blue-900/20' :
-                        topic.category === 'C#' ? 'border-purple-500/30 text-purple-400 bg-purple-900/20' :
-                        'border-orange-500/30 text-orange-400 bg-orange-900/20'
-                    }`}>{topic.category}</span>
-                    <span className={`text-sm px-3 py-1 rounded-full border ${
-                        topic.difficulty === '高级' ? 'border-red-500/50 text-red-400' : 
-                        topic.difficulty === '中级' ? 'border-yellow-500/50 text-yellow-400' : 
-                        'border-green-500/50 text-green-400'
-                    }`}>{topic.difficulty}</span>
-                </div>
-            </div>
-            <div className="p-8 flex-1 overflow-y-auto">
-                <p className="text-slate-300 mb-8 leading-loose text-xl">{topic.concept}</p>
-                {topic.exampleCode && (
-                <div className="relative group">
-                    <div className="absolute top-3 right-3 text-xs text-slate-500 font-mono px-2 py-1 bg-slate-800 rounded">C# Example</div>
-                    <div className="bg-[#111] rounded-xl p-6 border-l-4 border-cyan-600 font-mono text-sm overflow-x-auto text-slate-300 shadow-inner">
-                        <pre className="whitespace-pre-wrap break-words font-mono leading-6">{topic.exampleCode}</pre>
+          {/* Single Topic Card - Check availability */}
+          {topic ? (
+              <div className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col animate-fade-in">
+                <div className="p-8 border-b border-slate-700/50 bg-slate-800/50 flex justify-between items-start">
+                    <div className="flex items-center gap-4">
+                        <span className="flex items-center justify-center w-10 h-10 rounded-full bg-slate-700 text-cyan-400 font-bold border border-slate-600 text-lg">
+                            {currentTopicIndex + 1}
+                        </span>
+                        <h3 className="text-2xl font-bold text-slate-100">{topic.title}</h3>
+                    </div>
+                    <div className="flex gap-2">
+                        <span className={`text-sm px-3 py-1 rounded-full border font-mono ${
+                            topic.category === 'Unity' ? 'border-blue-500/30 text-blue-400 bg-blue-900/20' :
+                            topic.category === 'C#' ? 'border-purple-500/30 text-purple-400 bg-purple-900/20' :
+                            'border-orange-500/30 text-orange-400 bg-orange-900/20'
+                        }`}>{topic.category}</span>
+                        <span className={`text-sm px-3 py-1 rounded-full border ${
+                            topic.difficulty === '高级' ? 'border-red-500/50 text-red-400' : 
+                            topic.difficulty === '中级' ? 'border-yellow-500/50 text-yellow-400' : 
+                            'border-green-500/50 text-green-400'
+                        }`}>{topic.difficulty}</span>
                     </div>
                 </div>
-                )}
-            </div>
-          </div>
+                <div className="p-8 flex-1 overflow-y-auto">
+                    <div className="text-slate-300 mb-8 leading-loose text-lg">
+                        <MarkdownView content={topic.concept} />
+                    </div>
+                    {topic.exampleCode && (
+                    <div className="relative group mt-6">
+                        <div className="absolute top-3 right-3 text-xs text-slate-500 font-mono px-2 py-1 bg-slate-800 rounded">C# Example</div>
+                        <div className="bg-[#111] rounded-xl p-6 border-l-4 border-cyan-600 font-mono text-sm overflow-x-auto text-slate-300 shadow-inner">
+                            <pre className="whitespace-pre-wrap break-words font-mono leading-6">{topic.exampleCode}</pre>
+                        </div>
+                    </div>
+                    )}
+                </div>
+              </div>
+          ) : (
+              // Loading Placeholder for this specific card
+              <div className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl flex flex-col justify-center items-center shadow-inner text-slate-500">
+                  <Spinner />
+                  <p className="mt-4 animate-pulse">正在生成第 {currentTopicIndex + 1} 个知识点...</p>
+              </div>
+          )}
           
           {/* Navigation Buttons */}
           <div className="mt-8 flex justify-between gap-4">
@@ -400,10 +449,11 @@ const App: React.FC = () => {
                 ← 上一个
              </button>
              
-             {currentTopicIndex < topics.length - 1 ? (
+             {currentTopicIndex < DAILY_TOPIC_COUNT - 1 ? (
                  <button
-                    onClick={() => setCurrentTopicIndex(prev => Math.min(topics.length - 1, prev + 1))}
-                    className="px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1 flex items-center gap-2"
+                    onClick={() => setCurrentTopicIndex(prev => prev + 1)}
+                    disabled={!topic && (currentTopicIndex >= topics.length)} // Can't go next if current isn't even loaded? Actually user can jump to next loading screen
+                    className="px-10 py-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1 flex items-center gap-2 disabled:bg-slate-700 disabled:opacity-50"
                  >
                     下一个 →
                  </button>
@@ -421,8 +471,7 @@ const App: React.FC = () => {
   };
 
   const renderQuiz = (isComprehensive = false) => {
-      // STATE 1: Result Summary (Remains the same, list view for Review is typically better, 
-      // but user said "Test questions" need this method. I assume they mean Taking the test.)
+      // STATE 1: Result Summary
       if (quizResult && !isReviewing) {
           return (
             <div className="max-w-2xl mx-auto p-8 text-center pt-20 animate-fade-in">
@@ -464,7 +513,7 @@ const App: React.FC = () => {
           )
       }
       
-      // STATE 2: Review Mode (List View is better for Reviewing all at once)
+      // STATE 2: Review Mode
       if (quizResult && isReviewing) {
           return (
             <div className="max-w-3xl mx-auto p-6 pb-32 animate-fade-in">
@@ -546,9 +595,26 @@ const App: React.FC = () => {
           );
       }
 
-      // STATE 3: Taking Quiz (Paginated View)
-      if (questions.length === 0) return <Spinner />;
+      // STATE 3: Taking Quiz (Paginated View with Progressive Loading)
       const q = questions[currentQuestionIndex];
+      // Note: Quiz questions might still be generating in background if user skipped Learning fast.
+      // But typically for Daily quiz, we wait for questions.
+      // If q is undefined, it means we are waiting for background generation.
+
+      if (!q) {
+          return (
+              <div className="max-w-3xl mx-auto p-12 text-center">
+                  <Spinner />
+                  <p className="mt-4 text-slate-400 animate-pulse">正在生成题目 ({questions.length} 已就绪)...</p>
+              </div>
+          )
+      }
+
+      // Calculate total questions dynamically if we are still generating, or use loaded if done.
+      // For Daily: Target is Topics * 2. 
+      const estimatedTotal = isComprehensive ? questions.length : DAILY_TOPIC_COUNT * 2;
+      // If we have more questions than estimated (edge case), use actual length
+      const displayTotal = Math.max(questions.length, estimatedTotal);
 
       return (
         <div className="max-w-3xl mx-auto p-6 pb-32 flex flex-col min-h-[85vh]">
@@ -559,15 +625,19 @@ const App: React.FC = () => {
                         <span className={`rounded-lg px-3 py-1 text-sm ${isComprehensive ? 'bg-purple-900 text-purple-300' : 'bg-cyan-900 text-cyan-300'}`}>
                             {isComprehensive ? '汇总考试' : '每日测试'}
                         </span>
+                        {/* Show indicator if questions are still pouring in */}
+                        {!isComprehensive && questions.length < displayTotal && (
+                            <span className="text-xs text-slate-500 font-normal animate-pulse">题目生成中...</span>
+                        )}
                     </h2>
                     <div className="text-slate-400 font-mono text-sm">
-                        <span className="text-white font-bold">{currentQuestionIndex + 1}</span> / {questions.length}
+                        <span className="text-white font-bold">{currentQuestionIndex + 1}</span> / {displayTotal}
                     </div>
                 </div>
                 <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
                     <div 
                         className={`h-full transition-all duration-300 ease-out ${isComprehensive ? 'bg-purple-500' : 'bg-cyan-500'}`}
-                        style={{ width: `${((currentQuestionIndex + 1) / questions.length) * 100}%` }}
+                        style={{ width: `${((currentQuestionIndex + 1) / displayTotal) * 100}%` }}
                     ></div>
                 </div>
              </div>
@@ -589,6 +659,11 @@ const App: React.FC = () => {
                             key={oIdx}
                             onClick={() => {
                                 const newAnswers = [...quizAnswers];
+                                // Ensure array is big enough if questions grew dynamically
+                                if (newAnswers.length <= currentQuestionIndex) {
+                                    // Fill gaps if any
+                                    for(let i=newAnswers.length; i<=currentQuestionIndex; i++) newAnswers[i] = -1;
+                                }
                                 newAnswers[currentQuestionIndex] = oIdx;
                                 setQuizAnswers(newAnswers);
                             }}
@@ -619,17 +694,18 @@ const App: React.FC = () => {
                      ← 上一题
                  </button>
 
-                 {currentQuestionIndex < questions.length - 1 ? (
+                 {currentQuestionIndex < displayTotal - 1 ? (
                      <button
-                         onClick={() => setCurrentQuestionIndex(prev => Math.min(questions.length - 1, prev + 1))}
-                         className="px-10 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1"
+                         onClick={() => setCurrentQuestionIndex(prev => prev + 1)}
+                         disabled={currentQuestionIndex >= questions.length - 1} // Can't go forward if question isn't generated yet
+                         className="px-10 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold shadow-lg transition-transform hover:translate-x-1 disabled:bg-slate-700 disabled:opacity-50 disabled:cursor-wait"
                      >
-                         下一题 →
+                         {currentQuestionIndex >= questions.length - 1 ? "题目生成中..." : "下一题 →"}
                      </button>
                  ) : (
                      <button
                         onClick={submitQuiz}
-                        disabled={quizAnswers.includes(-1)}
+                        disabled={quizAnswers.includes(-1) || quizAnswers.length < displayTotal} // Require all answers
                         className="px-10 py-4 bg-green-600 hover:bg-green-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-white rounded-xl font-bold shadow-lg transition-colors text-lg"
                      >
                         提交试卷 ✅
