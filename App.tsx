@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AppView, Topic, QuizQuestion, QuizResult, UserData, SavedNote, TrackType } from './types';
 import { generateTopicBatch, generateQuizForBatch, generateStudyNotes, generateComprehensiveQuiz } from './services/geminiService';
@@ -103,7 +102,7 @@ const App: React.FC = () => {
       }
   };
 
-  // Action: Start New Day (Progressive Loading)
+  // Action: Start New Day (Progressive Loading with Batching)
   const startDay = async () => {
     if (!user) return;
     setLoading(true);
@@ -116,7 +115,7 @@ const App: React.FC = () => {
     const currentDay = user.progress[user.currentTrack];
 
     try {
-        // 1. Fetch Initial Batch (Just 1 topic)
+        // 1. Fetch Initial Batch (1 topic for immediate start)
         const batch1 = await generateTopicBatch(currentDay, 1, 1, [], user.currentTrack);
         setTopics(batch1);
         setLoading(false); 
@@ -127,34 +126,49 @@ const App: React.FC = () => {
              setQuestions(prev => [...prev, ...qs]);
         });
 
-        // 2. Fetch Remaining Topics in Background
-        // We use an IIFE here but we make it slower and more robust to rate limits
+        // 2. Fetch Remaining Topics in Batches
+        // We use an IIFE for the background process
         (async () => {
             let loadedTitles = batch1.map(t => t.title);
-            
-            for (let i = 2; i <= dailyTopicCount; i++) {
-                // DELAY: Wait 3 seconds between each topic generation to respect API Quota (RPM)
-                await new Promise(r => setTimeout(r, 3000));
+            let currentIdx = 2; // Start from the 2nd topic
+
+            while (currentIdx <= dailyTopicCount) {
+                // Calculate batch size (max 3 at a time to reduce request count)
+                // e.g. if we need 9 more, we do 3, 3, 3.
+                const batchSize = Math.min(3, dailyTopicCount - currentIdx + 1);
+                
+                // DELAY: Wait 10 seconds between batches to strictly respect API Quota
+                // Batching 3 topics = 1 request. + 1 Quiz request = 2 requests per 10s.
+                // This is ~12 RPM, which is safe for free tier.
+                await new Promise(r => setTimeout(r, 10000));
 
                 try {
-                    const nextBatch = await generateTopicBatch(currentDay, i, 1, loadedTitles, user.currentTrack);
+                    // console.log(`Background loading: fetching batch of ${batchSize} starting at ${currentIdx}`);
+                    const nextBatch = await generateTopicBatch(currentDay, currentIdx, batchSize, loadedTitles, user.currentTrack);
                     
                     if (nextBatch.length > 0) {
-                        const newTopic = nextBatch[0];
-                        loadedTitles.push(newTopic.title);
-                        setTopics(prev => [...prev, newTopic]);
+                        // Update context for next iteration to avoid duplicates
+                        nextBatch.forEach(t => loadedTitles.push(t.title));
                         
-                        // SERIALIZE: Wait for quiz generation before proceeding to next topic
-                        // This prevents firing multiple quiz generation requests in parallel
-                        await new Promise(r => setTimeout(r, 1000));
-                        const qs = await generateQuizForBatch([newTopic]);
+                        setTopics(prev => [...prev, ...nextBatch]);
+                        
+                        // Wait slightly before generating quiz to spread burst
+                        await new Promise(r => setTimeout(r, 2000));
+                        
+                        // Generate quizzes for this entire batch in one go (1 request)
+                        const qs = await generateQuizForBatch(nextBatch);
                         setQuestions(prev => [...prev, ...qs]);
+                    } else {
+                        // If we got nothing, stop.
+                        console.warn("Background batch generation returned empty.");
+                        break;
                     }
                 } catch (e) {
-                    console.warn("Background fetch hit an error (likely quota), stopping background load for now.", e);
-                    // Break the loop so we don't keep hammering if we are totally blocked
+                    console.warn("Background fetch error:", e);
                     break;
                 }
+                
+                currentIdx += batchSize;
             }
         })();
 

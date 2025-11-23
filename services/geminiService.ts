@@ -15,17 +15,37 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function runWithRetry<T>(
   fn: () => Promise<T>, 
   retries = 3, 
-  backoff = 2000
+  backoff = 10000 // Increased base backoff to 10s
 ): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
-    const msg = error.toString().toLowerCase();
-    const isRateLimit = msg.includes("429") || msg.includes("quota") || msg.includes("resource_exhausted") || error.status === 429;
+    // Robust error message extraction
+    let msg = "";
+    try {
+        if (typeof error === 'object') {
+            msg = JSON.stringify(error).toLowerCase();
+        } else {
+            msg = String(error).toLowerCase();
+        }
+    } catch (e) {
+        msg = "unknown error";
+    }
+
+    // Check for various forms of 429/Quota errors
+    const isRateLimit = 
+      msg.includes("429") || 
+      msg.includes("quota") || 
+      msg.includes("resource_exhausted") || 
+      error?.status === 429 ||
+      error?.code === 429 ||
+      error?.error?.code === 429 || 
+      error?.error?.status === "RESOURCE_EXHAUSTED";
     
     if (isRateLimit && retries > 0) {
-      console.warn(`API Quota hit (429). Retrying in ${backoff}ms...`);
+      console.warn(`API Quota hit (429). Retrying in ${backoff}ms...`, error);
       await delay(backoff);
+      // Exponential backoff: 10s -> 20s -> 40s
       return runWithRetry(fn, retries - 1, backoff * 2);
     }
     throw error;
@@ -245,7 +265,7 @@ export const sendMessageToChat = async (message: string): Promise<string> => {
   if (!chatSession) startChatSession();
   try {
     // For chat, we also want basic retry but usually chat is interactive so maybe less aggressive
-    const response = await runWithRetry<GenerateContentResponse>(() => chatSession!.sendMessage({ message }), 2, 1000);
+    const response = await runWithRetry<GenerateContentResponse>(() => chatSession!.sendMessage({ message }), 2, 2000);
     return response.text || "";
   } catch (error) {
     console.error("Chat error:", error);
