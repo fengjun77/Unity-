@@ -114,12 +114,23 @@ const App: React.FC = () => {
     
     const currentDay = user.progress[user.currentTrack];
 
+    // --- KEY FIX: Gather all historical topics for the current track ---
+    const historicalTopics = user.savedNotes
+      .filter(n => n.track === user.currentTrack)
+      .flatMap(n => n.topics.map(t => t.title));
+    
+    // Combine historical topics with what we generate in this session
+    let allExcludedTitles = [...historicalTopics];
+
     try {
         // 1. Fetch Initial Batch (1 topic for immediate start)
-        const batch1 = await generateTopicBatch(currentDay, 1, 1, [], user.currentTrack);
+        const batch1 = await generateTopicBatch(currentDay, 1, 1, allExcludedTitles, user.currentTrack);
+        
         setTopics(batch1);
         setLoading(false); 
         setView(AppView.LEARNING);
+        
+        batch1.forEach(t => allExcludedTitles.push(t.title));
 
         // Generate Quiz for Batch 1 (Background)
         generateQuizForBatch(batch1).then(qs => {
@@ -127,40 +138,28 @@ const App: React.FC = () => {
         });
 
         // 2. Fetch Remaining Topics in Batches
-        // We use an IIFE for the background process
         (async () => {
-            let loadedTitles = batch1.map(t => t.title);
             let currentIdx = 2; // Start from the 2nd topic
 
             while (currentIdx <= dailyTopicCount) {
                 // Calculate batch size (max 3 at a time to reduce request count)
-                // e.g. if we need 9 more, we do 3, 3, 3.
                 const batchSize = Math.min(3, dailyTopicCount - currentIdx + 1);
                 
-                // DELAY: Wait 10 seconds between batches to strictly respect API Quota
-                // Batching 3 topics = 1 request. + 1 Quiz request = 2 requests per 10s.
-                // This is ~12 RPM, which is safe for free tier.
-                await new Promise(r => setTimeout(r, 10000));
+                // DELAY: Wait 12 seconds between batches to strictly respect API Quota
+                await new Promise(r => setTimeout(r, 12000));
 
                 try {
-                    // console.log(`Background loading: fetching batch of ${batchSize} starting at ${currentIdx}`);
-                    const nextBatch = await generateTopicBatch(currentDay, currentIdx, batchSize, loadedTitles, user.currentTrack);
+                    const nextBatch = await generateTopicBatch(currentDay, currentIdx, batchSize, allExcludedTitles, user.currentTrack);
                     
                     if (nextBatch.length > 0) {
-                        // Update context for next iteration to avoid duplicates
-                        nextBatch.forEach(t => loadedTitles.push(t.title));
-                        
+                        nextBatch.forEach(t => allExcludedTitles.push(t.title));
                         setTopics(prev => [...prev, ...nextBatch]);
                         
-                        // Wait slightly before generating quiz to spread burst
                         await new Promise(r => setTimeout(r, 2000));
                         
-                        // Generate quizzes for this entire batch in one go (1 request)
                         const qs = await generateQuizForBatch(nextBatch);
                         setQuestions(prev => [...prev, ...qs]);
                     } else {
-                        // If we got nothing, stop.
-                        console.warn("Background batch generation returned empty.");
                         break;
                     }
                 } catch (e) {
@@ -406,7 +405,7 @@ const App: React.FC = () => {
                         : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500'
                     }`}
                  >
-                    {loading ? "AI 正在极速生成..." : hasSession ? "请先完成当前课程" : `开始 Day ${trackProgress}`}
+                    {loading ? "AI 正在极速生成 (已过滤重复)..." : hasSession ? "请先完成当前课程" : `开始 Day ${trackProgress}`}
                  </button>
              </div>
 
@@ -460,13 +459,27 @@ const App: React.FC = () => {
 
   const renderLearning = () => {
     const topic = topics[currentTopicIndex];
+    // Helper to determine phase name
+    const getPhaseName = () => {
+        if (!user) return "";
+        const day = user.progress.UNITY;
+        if (day <= 5) return "基础入门阶段";
+        if (day <= 15) return "游戏系统开发阶段";
+        if (day <= 20) return "算法与AI阶段";
+        return "架构与优化阶段";
+    };
     
     return (
         <div className="max-w-4xl mx-auto p-6 pb-32 flex flex-col min-h-[85vh]">
           {/* Progress Bar */}
           <div className="mb-8">
              <div className="flex justify-between text-sm text-slate-400 mb-2">
-                <span>进度 ({user?.currentTrack === 'UNITY' ? 'Unity' : 'C#'})</span>
+                <span className="flex items-center gap-2">
+                    <span className="bg-slate-800 px-2 py-0.5 rounded text-xs border border-slate-700 text-cyan-400">
+                        {user?.currentTrack === 'UNITY' ? getPhaseName() : 'C# 进阶'}
+                    </span>
+                    <span>进度</span>
+                </span>
                 <span>{currentTopicIndex + 1} / {dailyTopicCount}</span>
              </div>
              <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
@@ -517,7 +530,7 @@ const App: React.FC = () => {
                     <div className="relative group mt-6">
                         <div className="absolute top-3 right-3 text-xs text-slate-500 font-mono px-2 py-1 bg-slate-800 rounded">Code Example</div>
                         <div className="bg-[#111] rounded-xl p-6 border-l-4 border-cyan-600 font-mono text-sm overflow-x-auto text-slate-300 shadow-inner">
-                            <pre className="whitespace-pre-wrap break-words font-mono leading-6">{topic.exampleCode}</pre>
+                            <pre className="whitespace-pre-wrap break-words font-mono leading-6">{topic.exampleCode.replace(/\\n/g, '\n')}</pre>
                         </div>
                     </div>
                     )}
